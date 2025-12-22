@@ -1,153 +1,188 @@
 from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
-
 import pandas as pd
-import time
-import re
+import time, re, json
 
 # ================= CONFIG =================
-BASE_URL = "https://vuadocau.com/shop/"
-WAIT = 10
-LIMIT = 20
-OUTPUT_FILE = "vuadocau_test_20_products_FINAL.xlsx"
+URLS = [
+    "https://vuadocau.com/thung-dung-ca-da-nang-nhieu-kich-co/",
+    "https://vuadocau.com/moi-cau-guide-post-bowan-pencil-80s/"
+]
+OUTPUT_FILE = "vuadocau_test_final.xlsx"
 
 # ================= DRIVER =================
 options = Options()
 options.add_argument("--window-size=1920,1080")
+driver = webdriver.Chrome(options=options)
+wait = WebDriverWait(driver, 15)
 
-driver = webdriver.Chrome(
-    service=Service(ChromeDriverManager().install()),
-    options=options
-)
-wait = WebDriverWait(driver, WAIT)
-
-# ================= LOAD SHOP =================
-driver.get(BASE_URL)
-wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "li.product")))
-
-cards = driver.find_elements(By.CSS_SELECTOR, "li.product")
-
-items = []
-has_sale = False
-
-def get_price_from_listing(card):
+# ================= HELPERS =================
+def safe_text(by, sel):
     try:
-        price_box = card.find_element(By.CSS_SELECTOR, "span.price")
-        try:
-            reg = price_box.find_element(By.CSS_SELECTOR, "del span").text.strip()
-            sale = price_box.find_element(By.CSS_SELECTOR, "ins span").text.strip()
-        except:
-            reg = price_box.text.strip()
-            sale = ""
-        return reg, sale
+        return driver.find_element(by, sel).text.strip()
     except:
-        return "", ""
+        return ""
 
-# ================= COLLECT LINKS + PRICE =================
-for card in cards:
-    if len(items) >= LIMIT and has_sale:
-        break
-
+def get_image_url():
     try:
-        link = card.find_element(
-            By.CSS_SELECTOR, "a.woocommerce-LoopProduct-link"
-        ).get_attribute("href")
-
-        price_regular, price_sale = get_price_from_listing(card)
-
-        # chỉ lấy sản phẩm có giá
-        if not price_regular:
-            continue
-
-        if price_sale:
-            has_sale = True
-
-        items.append({
-            "url": link,
-            "price_regular": price_regular,
-            "price_sale": price_sale
-        })
+        img = driver.find_element(By.CSS_SELECTOR, "img.wp-post-image")
+        return img.get_attribute("src") or img.get_attribute("data-src") or ""
     except:
-        continue
-
-print(f"🔗 Lấy {len(items)} sản phẩm | Có khuyến mãi: {has_sale}")
-
-# ================= SCRAPE DETAIL =================
-rows = []
-
-for idx, item in enumerate(items, start=1):
-    driver.get(item["url"])
-    time.sleep(1.5)
-
-    def safe_text(by, sel):
         try:
-            return driver.find_element(by, sel).text.strip()
+            img = driver.find_element(
+                By.CSS_SELECTOR,
+                "figure.woocommerce-product-gallery__wrapper img"
+            )
+            return img.get_attribute("src") or img.get_attribute("data-src") or ""
         except:
             return ""
 
-    page_text = driver.page_source
+def get_rating():
+    rating_score = None
+    count_rate = None
 
-    # IMAGE
     try:
-        img = driver.find_element(By.CSS_SELECTOR, "figure img")
-        image_url = img.get_attribute("data-src") or img.get_attribute("src") or ""
+        star = driver.find_element(By.CSS_SELECTOR, "div.star-rating")
+        label = star.get_attribute("aria-label") or ""
+        m = re.search(r"([\d.]+)", label)
+        if m:
+            rating_score = m.group(1)
     except:
-        image_url = ""
+        pass
 
-    # STOCK STATUS
-    stock_status = safe_text(By.CSS_SELECTOR, "p.stock")
-
-    # RATING
     try:
-        rating_text = driver.find_element(
-            By.CSS_SELECTOR, "div.star-rating"
-        ).get_attribute("aria-label")
+        review_link = driver.find_element(By.CSS_SELECTOR, "a.woocommerce-review-link")
+        m = re.search(r"(\d+)", review_link.text)
+        if m:
+            count_rate = m.group(1)
     except:
-        rating_text = ""
+        pass
 
-    # SOLD COUNT (ĐÃ FIX)
-    sold_count = ""
+    return rating_score, count_rate
+
+
+
+def get_first_comment():
     try:
-        sold_text = driver.find_element(
-            By.XPATH, "//*[contains(text(),'đã bán')]"
-        ).text
-        sold_count = re.search(r"\d+", sold_text).group()
+        return driver.find_element(
+            By.CSS_SELECTOR,
+            "ol.commentlist li.review:first-child p"
+        ).text.strip()
     except:
-        sold_count = ""
-
-    # SIZE (RAW – chỉ lấy text có thông số, không có thì trống)
-    size = ""
-    desc = safe_text(By.CSS_SELECTOR, "div.woocommerce-product-details__short-description")
-    if desc:
-        size_matches = re.findall(r"\d+\s?(?:cm|mm|m|lb|kg|g)", desc.lower()    )
-    if size_matches:
-        size = " | ".join(sorted(set(size_matches)))
+        return ""
 
 
-    # COLOR GROUP (RAW – chỉ lấy mã màu thật)
-    color_group = ""
-    codes = re.findall(r"GP-\d+", page_text, flags=re.IGNORECASE)
-    if codes:
-        color_group = "~".join(sorted(set(codes)))
+def get_size_price_raw():
+    size_price = {}
+    try:
+        form = driver.find_element(By.CSS_SELECTOR, "form.variations_form")
+        data = form.get_attribute("data-product_variations")
+        if not data:
+            return "", ""
+
+        variations = json.loads(data)
+        for v in variations:
+            attrs = v.get("attributes", {})
+            price = v.get("display_price")
+
+            size = ""
+            for k, val in attrs.items():
+                if "size" in k or "kich" in k:
+                    size = str(val)
+
+            if size and price is not None and size not in size_price:
+                size_price[size] = str(int(price))
+
+    except:
+        pass
+
+    sizes = " | ".join(size_price.keys())
+    prices = " | ".join(size_price.values())
+    return sizes, prices
+
+def get_sold_count():
+    try:
+        els = driver.find_elements(
+            By.XPATH,
+            "//*[contains(translate(text(),'ĐÃ','đã'),'đã bán')]"
+        )
+        for el in els:
+            text = el.text.strip()
+            m = re.search(r"(\d+)\s*đã\s*bán", text)
+            if m:
+                return m.group(1)
+        return ""
+    except:
+        return ""
+
+
+def get_color_group():
+    colors = []
+
+    # 1️⃣ ƯU TIÊN: màu dạng swatch (ảnh + text)
+    try:
+        spans = driver.find_elements(
+            By.CSS_SELECTOR,
+            "ul.variable-items-wrapper span.variable-item-span"
+        )
+        for s in spans:
+            txt = s.text.strip()
+            if txt and txt.lower() not in ["chọn một tùy chọn"]:
+                colors.append(txt)
+    except:
+        pass
+
+    if colors:
+        return " | ".join(dict.fromkeys(colors))  # giữ thứ tự, bỏ trùng
+
+    # 2️⃣ FALLBACK: GP-xxx nếu không có swatch
+    try:
+        gps = re.findall(r"GP-\d+", driver.page_source, flags=re.IGNORECASE)
+        gps = sorted(set(g.upper() for g in gps))
+        if gps:
+            nums = [int(g.split("-")[1]) for g in gps]
+            if max(nums) - min(nums) == len(nums) - 1:
+                return f"GP-{min(nums)} ~ GP-{max(nums)}"
+            return " | ".join(gps)
+    except:
+        pass
+
+    return ""
+
+
+# ================= MAIN =================
+rows = []
+
+for idx, url in enumerate(URLS, start=1):
+    print(f"📦 Crawl: {url}")
+    driver.get(url)
+    time.sleep(4)
+
+    name = safe_text(By.TAG_NAME, "h1")
+    short_desc = safe_text(By.CSS_SELECTOR, "div.woocommerce-product-details__short-description")
+    image_url = get_image_url()
+
+    size, price = get_size_price_raw()
+    color = get_color_group()
+    rating_score, count_rate = get_rating()
+    sold_count = get_sold_count()
+    first_comment = get_first_comment()
 
     rows.append({
-        "name": safe_text(By.TAG_NAME, "h1"),
+        "name": name,
         "size": size,
-        "price_regular": item["price_regular"],
-        "price_sale": item["price_sale"],
-        "color_group": color_group,
-        "image_url": image_url,
-        "stock_status": stock_status,
+        "price": price,
+        "color": color,
+        "rating_score": rating_score,
+        "count_rate": count_rate,
         "sold_count": sold_count,
-        "comment_count": len(driver.find_elements(By.CSS_SELECTOR, "ol.commentlist li.review")),
-        "rating_text": rating_text,
-        "short_description": desc,
-        "product_url": item["url"]
+        "first_comment": first_comment,
+        "short_description": short_desc,
+        "product_url": url,
+        "image_url": image_url
     })
 
 # ================= EXPORT =================
@@ -155,5 +190,4 @@ df = pd.DataFrame(rows)
 df.to_excel(OUTPUT_FILE, index=False)
 
 driver.quit()
-
-print(f"\n✅ HOÀN THÀNH – file xuất ra: {OUTPUT_FILE}")
+print(f"✅ Hoàn thành – file: {OUTPUT_FILE}")
