@@ -5,17 +5,19 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 import pandas as pd
 import time, re, json
+from datetime import datetime
 
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 
 # ================= CONFIG =================
 BASE_URL = "https://vuadocau.com/shop/"
-OUTPUT_FILE = "vuadocau_ALL_products.xlsx"
+OUTPUT_FILE = f"vuadocau_products_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
 WAIT = 15
 
 # ================= DRIVER =================
 options = Options()
 options.add_argument("--window-size=1920,1080")
+# options.add_argument("--headless")  # Bỏ comment nếu muốn chạy ẩn
 driver = webdriver.Chrome(options=options)
 wait = WebDriverWait(driver, WAIT)
 
@@ -80,7 +82,6 @@ def get_first_comment():
 
 def get_sold_count():
     try:
-        # Tìm trong page source
         page_text = driver.page_source
         patterns = [
             r'(\d+)\s*đã\s*bán',
@@ -92,7 +93,6 @@ def get_sold_count():
             if matches:
                 return matches[0]
         
-        # Fallback: tìm element
         els = driver.find_elements(
             By.XPATH,
             "//*[contains(translate(text(),'ĐÃ','đã'),'đã bán')]"
@@ -106,76 +106,93 @@ def get_sold_count():
     return None
 
 def get_size_price_raw():
-    """
-    FIX: Lấy size (chiều dài) và price từ variations
-    """
+    """Lấy size và price - Hỗ trợ cả variable và simple product"""
     size_price = {}
     
+    # CHECK 1: Variable Product (có variations)
     try:
-        # Lấy data variations từ form
         form = driver.find_element(By.CSS_SELECTOR, "form.variations_form")
         data = form.get_attribute("data-product_variations")
         
-        if not data:
-            # Nếu không có variations, thử lấy giá đơn giản
-            try:
-                price_el = driver.find_element(By.CSS_SELECTOR, "p.price .woocommerce-Price-amount bdi")
-                price_text = price_el.text.strip()
-                # Parse giá: "1,150,000₫" -> "1150000"
-                price_clean = re.sub(r'[^\d]', '', price_text)
-                if price_clean:
-                    return None, price_clean
-            except:
-                pass
-            return None, None
-        
-        variations = json.loads(data)
-        
-        for v in variations:
-            # Kiểm tra sản phẩm có bán được không
-            if not v.get("is_purchasable", True):
-                continue
+        if data:
+            variations = json.loads(data)
             
-            attrs = v.get("attributes", {})
-            price_raw = v.get("display_price") or v.get("price")
-            
-            if price_raw is None:
-                continue
-            
-            # Tìm attribute size (có thể là "size", "chieu-dai", "kich-thuoc", v.v.)
-            size = None
-            for key, val in attrs.items():
-                key_lower = key.lower()
-                # Check nhiều pattern khác nhau
-                if any(keyword in key_lower for keyword in [
-                    "size", "kich", "chieu", "dai", "length"
-                ]):
-                    size = str(val).strip()
-                    break
-            
-            if not size:
-                # Nếu không tìm được key, lấy value đầu tiên
-                if attrs:
+            for v in variations:
+                if not v.get("is_purchasable", True):
+                    continue
+                
+                attrs = v.get("attributes", {})
+                price_raw = v.get("display_price") or v.get("price")
+                
+                if price_raw is None:
+                    continue
+                
+                # Tìm size attribute
+                size = None
+                for key, val in attrs.items():
+                    key_lower = key.lower()
+                    if any(keyword in key_lower for keyword in [
+                        "size", "kich", "chieu", "dai", "length"
+                    ]):
+                        size = str(val).strip()
+                        break
+                
+                if not size and attrs:
                     size = str(list(attrs.values())[0]).strip()
-            
-            if size and size not in size_price:
-                # Format giá: loại bỏ số thập phân nếu .0
-                price_val = float(price_raw)
-                if price_val == int(price_val):
-                    size_price[size] = str(int(price_val))
-                else:
-                    size_price[size] = str(price_val)
-        
-    except Exception as e:
-        print(f"  ⚠️ Lỗi get_size_price: {e}")
+                
+                if size and size not in size_price:
+                    price_val = float(price_raw)
+                    if price_val == int(price_val):
+                        size_price[size] = str(int(price_val))
+                    else:
+                        size_price[size] = str(price_val)
+    except:
         pass
+    
+    # CHECK 2: Simple Product (giá cố định)
+    if not size_price:
+        try:
+            price_selectors = [
+                "p.price .woocommerce-Price-amount bdi",
+                "p.price .woocommerce-Price-amount",
+                "p.price .amount bdi",
+                "p.price .amount",
+                "span.woocommerce-Price-amount bdi",
+                "span.woocommerce-Price-amount",
+                ".price bdi",
+                ".price .amount",
+                "p.price ins .amount",
+                "p.price span.amount",
+            ]
+            
+            for sel in price_selectors:
+                try:
+                    price_el = driver.find_element(By.CSS_SELECTOR, sel)
+                    price_text = price_el.text.strip()
+                    
+                    if price_text:
+                        price_clean = re.sub(r'[^\d]', '', price_text)
+                        
+                        if price_clean and int(price_clean) > 0:
+                            return None, price_clean
+                except:
+                    continue
+            
+            # Fallback: Tìm trong page source
+            price_matches = re.findall(r'([\d,\.]+)\s*VN[DĐ]', driver.page_source)
+            if price_matches:
+                for match in price_matches:
+                    price_clean = re.sub(r'[^\d]', '', match)
+                    if price_clean and int(price_clean) > 1000:
+                        return None, price_clean
+        except:
+            pass
     
     if not size_price:
         return None, None
     
-    # Sort theo size nếu có thể (ví dụ: 4m5, 5m4, 6m3)
+    # Sort sizes
     try:
-        # Extract số từ size string
         def extract_number(s):
             nums = re.findall(r'[\d.]+', s)
             return float(nums[0]) if nums else 0
@@ -191,14 +208,11 @@ def get_size_price_raw():
     return sizes, prices
 
 def get_color_group():
-    """
-    FIX: Lấy màu sắc/nhóm sản phẩm
-    """
+    """Lấy màu sắc/nhóm sản phẩm"""
     colors = []
     
-    # CÁCH 1: Lấy từ color swatches/variations
+    # CÁCH 1: Swatches/variations UI
     try:
-        # Thử nhiều selector
         selectors = [
             "ul.variable-items-wrapper span.variable-item-span",
             "div.variations select[name*='color'] option",
@@ -226,7 +240,7 @@ def get_color_group():
     except:
         pass
     
-    # CÁCH 2: Lấy từ variations data trong form
+    # CÁCH 2: Variations data trong form
     if not colors:
         try:
             form = driver.find_element(By.CSS_SELECTOR, "form.variations_form")
@@ -238,7 +252,6 @@ def get_color_group():
                     attrs = v.get("attributes", {})
                     for key, val in attrs.items():
                         key_lower = key.lower()
-                        # Tìm attribute liên quan đến màu
                         if any(x in key_lower for x in [
                             "color", "mau", "colour", "nhom", "group"
                         ]):
@@ -247,29 +260,26 @@ def get_color_group():
         except:
             pass
     
-    # CÁCH 3: Tìm trong description text (ví dụ: "Màu sắc: đỏ – đen")
+    # CÁCH 3: Description text (Pattern: "Màu sắc: xxx")
     if not colors:
         try:
-            # Tìm trong short description
             desc = driver.find_element(
                 By.CSS_SELECTOR, 
                 "div.woocommerce-product-details__short-description"
             ).text
             
-            # Pattern: "Màu sắc: xxx"
             color_match = re.search(
                 r'[Mm]àu\s*sắc\s*[:\-]\s*([^\n.]+)',
                 desc
             )
             if color_match:
                 color_str = color_match.group(1).strip()
-                # Split by common separators
                 color_parts = re.split(r'[,;–\-/]', color_str)
                 colors = [c.strip() for c in color_parts if c.strip()]
         except:
             pass
     
-    # CÁCH 4: Tìm GP-XXX pattern
+    # CÁCH 4: GP-XXX pattern (cho mồi câu)
     if not colors:
         try:
             gps = re.findall(r'GP-\d+', driver.page_source, flags=re.IGNORECASE)
@@ -277,14 +287,13 @@ def get_color_group():
             
             if gps:
                 nums = [int(g.split("-")[1]) for g in gps]
-                # Nếu là dãy liên tiếp
                 if len(nums) > 2 and max(nums) - min(nums) == len(nums) - 1:
                     return f"GP-{min(nums)} ~ GP-{max(nums)}"
                 return " | ".join(gps)
         except:
             pass
     
-    # CÁCH 5: Tìm trong product title
+    # CÁCH 5: Product title
     if not colors:
         try:
             title = driver.find_element(By.TAG_NAME, "h1").text
@@ -295,42 +304,61 @@ def get_color_group():
             pass
     
     if colors:
-        # Loại bỏ duplicate, giữ thứ tự
         unique_colors = list(dict.fromkeys(colors))
         return " | ".join(unique_colors)
     
     return None
 
 # ================= GET ALL PRODUCT LINKS =================
-print("🚀 Lấy danh sách sản phẩm...")
+print("🚀 BẮT ĐẦU CÀO DỮ LIỆU VUADOCAU.COM")
+print("="*80)
+print("📋 BƯỚC 1: Lấy danh sách sản phẩm từ tất cả các trang...\n")
+
 driver.get(BASE_URL)
-product_links = set()
+product_links_set = set()
+page_num = 1
 
 while True:
-    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "li.product")))
-    cards = driver.find_elements(By.CSS_SELECTOR, "li.product a.woocommerce-LoopProduct-link")
-    for c in cards:
-        href = c.get_attribute("href")
-        if href:
-            product_links.add(href)
-
     try:
-        next_btn = driver.find_element(By.CSS_SELECTOR, "a.next.page-numbers")
-        next_btn.click()
-        time.sleep(2)
-    except:
-        print("✅ Đã hết trang")
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "li.product")))
+        cards = driver.find_elements(By.CSS_SELECTOR, "li.product a.woocommerce-LoopProduct-link")
+        
+        count_before = len(product_links_set)
+        for c in cards:
+            href = c.get_attribute("href")
+            if href:
+                product_links_set.add(href)
+        
+        count_after = len(product_links_set)
+        new_products = count_after - count_before
+        print(f"  Trang {page_num}: +{new_products} sản phẩm (Tổng: {count_after})")
+        
+        # Tìm nút Next
+        try:
+            next_btn = driver.find_element(By.CSS_SELECTOR, "a.next.page-numbers")
+            next_btn.click()
+            time.sleep(2)
+            page_num += 1
+        except:
+            print("\n✅ Đã hết trang!")
+            break
+            
+    except Exception as e:
+        print(f"\n⚠️ Lỗi khi load trang: {e}")
         break
 
-product_links = list(product_links)
-print(f"🔗 Tổng sản phẩm: {len(product_links)}")
+product_links = list(product_links_set)
+print(f"\n🔗 TỔNG CỘNG: {len(product_links)} sản phẩm unique")
 
-# ================= SCRAPE ALL =================
+# ================= SCRAPE ALL PRODUCTS =================
+print(f"\n{'='*80}")
+print("📦 BƯỚC 2: Cào chi tiết từng sản phẩm...\n")
+
 rows = []
+start_time = time.time()
+errors = []
 
 for idx, url in enumerate(product_links, start=1):
-    print(f"📦 [{idx}/{len(product_links)}] {url}")
-    
     try:
         driver.get(url)
         time.sleep(3)
@@ -344,7 +372,17 @@ for idx, url in enumerate(product_links, start=1):
         rating_score, count_rate = get_rating()
         sold_count = get_sold_count()
         first_comment = get_first_comment()
-
+        
+        # Progress indicator
+        if idx % 10 == 0 or idx == len(product_links):
+            elapsed = time.time() - start_time
+            avg_time = elapsed / idx
+            remaining = avg_time * (len(product_links) - idx)
+            
+            print(f"📦 [{idx}/{len(product_links)}] "
+                  f"⏱️ {int(elapsed/60)}p{int(elapsed%60)}s "
+                  f"(Còn ~{int(remaining/60)}p)")
+        
         rows.append({
             "name": name,
             "size": size,
@@ -360,26 +398,56 @@ for idx, url in enumerate(product_links, start=1):
         })
         
     except Exception as e:
-        print(f"  ❌ Lỗi khi cào {url}: {e}")
+        errors.append({"url": url, "error": str(e)})
+        print(f"  ❌ [{idx}] Lỗi: {url[:50]}... - {e}")
         continue
 
-# ================= EXPORT =================
+# ================= EXPORT TO EXCEL =================
 driver.quit()
+
+total_time = time.time() - start_time
+minutes = int(total_time // 60)
+seconds = int(total_time % 60)
 
 if rows:
     df = pd.DataFrame(rows)
-
-    # Làm sạch ký tự cấm Excel
     df = df.map(clean_excel)
 
-    # Convert to string để không hiện 0
+    # Convert to string
     for col in ["rating_score", "count_rate", "sold_count", "first_comment"]:
         if col in df.columns:
             df[col] = df[col].astype(str).replace('None', '').replace('nan', '')
 
+    # Export
     df.to_excel(OUTPUT_FILE, index=False)
 
-    print(f"\n✅ HOÀN THÀNH – Đã cào {len(df)} sản phẩm")
-    print(f"📄 File: {OUTPUT_FILE}")
+    print(f"\n{'='*80}")
+    print(f"✅ HOÀN THÀNH!")
+    print(f"{'='*80}")
+    print(f"📊 Thống kê:")
+    print(f"  • Tổng sản phẩm: {len(df)}")
+    print(f"  • Có price: {df['price'].notna().sum()} ({df['price'].notna().sum()/len(df)*100:.1f}%)")
+    print(f"  • Có size: {df['size'].notna().sum()} ({df['size'].notna().sum()/len(df)*100:.1f}%)")
+    print(f"  • Có color: {df['color'].notna().sum()} ({df['color'].notna().sum()/len(df)*100:.1f}%)")
+    print(f"  • Có rating: {df['rating_score'].str.len().gt(0).sum()}")
+    print(f"  • Có đã bán: {df['sold_count'].str.len().gt(0).sum()}")
+    print(f"  • Lỗi: {len(errors)}")
+    print(f"\n⏱️  Thời gian: {minutes} phút {seconds} giây")
+    print(f"📄 File xuất: {OUTPUT_FILE}")
+    print(f"{'='*80}\n")
+    
+    # Preview
+    print("📋 PREVIEW 5 SẢN PHẨM ĐẦU:")
+    pd.set_option('display.max_columns', None)
+    pd.set_option('display.max_colwidth', 30)
+    print(df[['name', 'price', 'size', 'color']].head().to_string(index=False))
+    
+    if errors:
+        print(f"\n⚠️ Có {len(errors)} lỗi - Chi tiết:")
+        for err in errors[:5]:
+            print(f"  • {err['url'][:60]}... - {err['error']}")
+    
 else:
-    print("\n⚠️ Không có dữ liệu để lưu!")
+    print("\n❌ Không có dữ liệu để xuất!")
+
+print(f"\n🎉 XONG! Mở file {OUTPUT_FILE} để xem kết quả.")
