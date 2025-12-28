@@ -1,4 +1,4 @@
-# Nhom-ACE32
+# MnM-VinhAn-QuocBinh
 
 ## Giới thiệu
 Dự án crawl dữ liệu sản phẩm từ website **Vua Đồ Câu** bằng Python.  
