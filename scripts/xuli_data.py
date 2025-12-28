@@ -8,7 +8,7 @@ OUTPUT_MISSING = r"D:\PYTHON\project\vuadocau\xulidata\vuadocau_missing_dataset.
 
 df = pd.read_excel(INPUT_FILE)
 
-print("📄 Kích thước ban đầu:", df.shape)
+print(" Kích thước ban đầu:", df.shape)
 print(df.head())
 
 
@@ -71,8 +71,8 @@ df_clean.to_excel(OUTPUT_CLEAN, index=False)
 df_missing.to_excel(OUTPUT_MISSING, index=False)
 
 # ================= REPORT =================
-print("\n✅ XỬ LÝ HOÀN TẤT")
-print("📄 Dataset sạch:", df_clean.shape)
-print("⚠️ Dataset thiếu dữ liệu:", df_missing.shape)
-print("📁 File sạch:", OUTPUT_CLEAN)
-print("📁 File thiếu:", OUTPUT_MISSING)
+print("\n XỬ LÝ HOÀN TẤT")
+print("Dataset sạch:", df_clean.shape)
+print(" Dataset thiếu dữ liệu:", df_missing.shape)
+print(" File sạch:", OUTPUT_CLEAN)
+print(" File thiếu:", OUTPUT_MISSING)

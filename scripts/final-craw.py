@@ -1,5 +1,5 @@
 # coding: utf-8
-"""Vuadocau.com Scraper - Compact nhưng giữ nguyên logic"""
+
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
